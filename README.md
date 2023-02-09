@@ -80,6 +80,9 @@
 - jpg 등과 같은 이미지 파일 적용
 - 기능 개발(시험 과목 확장, 유사문제 추천, 해설 제공 등)
 
+## <br/>❓ How to Use
+Poetry를 이용한 환경 설정과 Frontend, Backend 서버 실행 방법에 대해 다룬 [README](https://github.com/boostcampaitech4lv23cv3/final-project-level3-cv-14/blob/master/code/fastapi/README.md)
+
 ## <br/>📜 Reference
 
 - [Mmdetection](https://github.com/open-mmlab/mmdetection)
