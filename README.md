@@ -23,9 +23,9 @@
 ## <br/>📑 Project Overview
 
 - 프로젝트 수행 기간 : 2023.01.09. ~ 2023.02.09.
-- 발표 영상: Link
-- 발표 자료: Link
-- 프로젝트 소개 : Link
+- 발표 영상: [Link](https://youtu.be/K58zIGAeKP8)
+- 발표 자료: [Link](https://drive.google.com/file/d/19-3Co7l_IogkPFJwmyt27zMFkGrljhQs/view?usp=sharing)
+- 프로젝트 소개 : [Link](https://whatsthescore.notion.site/751cae9de62c4603b6bc26fbb71eb156)
 
 ## <br/>🎥 데모 영상
 
