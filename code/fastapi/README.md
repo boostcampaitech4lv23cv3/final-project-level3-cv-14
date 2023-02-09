@@ -41,8 +41,7 @@ FastAPI을 이용한 모델 온라인 서빙
         > pip install pdf2img
         > apt-get install poppler-utils
         > pip install pycocotools
-
-        > mkdir /opt/ml/input/code/fastapi/app/tmp
+        > pip install stqdm
 
         > pip install -U openmim
         > mim install mmcv-full

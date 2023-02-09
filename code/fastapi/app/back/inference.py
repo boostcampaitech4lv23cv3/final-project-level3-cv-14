@@ -1,11 +1,13 @@
 from mmdet.apis import inference_detector
 from PIL import Image
-import numpy as np
-import pandas as pd
-import cv2
-import json
-import io
 from copy import deepcopy
+from utils import *
+from recognition import *
+import cv2
+from typing import List, Dict
+import numpy as np
+import torch.nn as nn
+import os
 
 
 class Inference:
@@ -51,7 +53,7 @@ class Inference:
         anns_dict = {q["category_id"]: self.xywh2ltrb(q["bbox"]) for q in questions}
         return anns_dict
 
-    def get_predict(self, img, box_threshold=0.3):
+    def get_predict(self, img, box_threshold=0.1):
         """_summary_
 
         Args:
@@ -231,6 +233,8 @@ class Inference:
                     "confidence": [bbox[-2] for q, bbox in a_b],
                 }
             )
+            if not os.path.isdir("/opt/ml/input/code/fastapi/app/log"):
+                os.mkdir("/opt/ml/input/code/fastapi/app/log")
             pred_data.to_csv("/opt/ml/input/code/fastapi/app/log/predict_log.csv")
 
         user_solution = {q: int(bbox[-1]) for q, bbox in sorted(answer_bbox.items())}
@@ -238,13 +242,11 @@ class Inference:
 
     def save_score_img(self, scoring_result):
         # 채점된 이미지를 만들기 위해 o, x 이미지를 불러오는 부분입니다.
-        # TODO: 위의 input이미지의 resize 부분과 함께 고려해야 할 사항입니다.
         o_image = Image.open("/opt/ml/input/code/fastapi/app/scoring_image/correct.png")
         x_image = Image.open("/opt/ml/input/code/fastapi/app/scoring_image/wrong.png")
         o_width, o_height = o_image.size
         x_width, x_height = x_image.size
 
-        # TODO: 현재 paste 좌표가 좌측 하단으로 잡혀있음 (좌측 상단으로 바꿔야함. annotation 정보 확인 필요)
         score_img = []
         for idx, img in enumerate(self.images):  # fix
             background = Image.fromarray(img)
@@ -273,25 +275,316 @@ class Inference:
         return score_img
 
 
-if __name__ == "__main__":
-    from pycocotools.coco import COCO
-    from mmdet.apis import init_detector
-    import os
-    from PIL import Image
+class Inference_v2:
+    def __init__(
+        self,
+        images: List[np.array],
+        detector: nn.Module,
+        q_bbox: List[Dict],
+        answer: Dict,
+        img_shape: List[int],
+        time: str,
+        ocr_model: nn.Module,
+    ):
+        """inference 모듈 초기화
 
-    model_config = "/opt/ml/input/data/models/19/config.py"
-    model_weight = "/opt/ml/input/data/models/19/model.pth"
-    coco = COCO("/opt/ml/input/data/annotations/train_v1-3.json")
-    detector = init_detector(model_config, model_weight, device="cuda:0")
+        Args:
+            images (List[np.array]): numpy array의 list
+            detector (nn.Module): mmdetection의 init_detector
+            q_bbox (List[Dict]): db에서 불러온 문제 박스의 annotation 정보
+            answer (Dict): db에서 불러온 시험지 정답
+            img_shape (List[int]): image shape
+            time (str): 객체 생성 시간
+            ocr_model (nn.Module): recognition.py의 load_ocr_model
+        """
+        self.images = images
+        self.detector = detector
+        self.q_bbox = q_bbox
+        self.answer = answer
+        self.inference_detector = inference_detector
+        self.origin_img_shape = img_shape
+        self.time = time
+        self.ocr_model = ocr_model
 
-    img_path = "/opt/ml/input/data/infer_test"
-    img_paths = [os.path.join(img_path, img) for img in os.listdir(img_path)]
-    images_np = [np.array(Image.open(img)) for img in img_paths]
-    inference = Inference(
-        images=images_np,
-        exam_info="2021_f_a",
-        coco=coco,
-        detector=detector,
-    )
-    result = inference.make_user_solution(True, True)
-    print("hi")
+    def ltrb2xywh(self, bbox: list) -> List:
+        """left, top, right, bottom -> x_min, y_max (좌상단), width, hegith
+
+        Args:
+            bbox (list): [x_min, y_max, x_max, y_min]
+
+        Returns:
+            bbox (list): [x_min, y_max, width, hegith]
+        """
+        return [bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]]
+
+    def get_predict(self, img: np.array, box_threshold: float = 0.1) -> list:
+        """detection 모델 예측
+
+        Args:
+            img (np.array): numpy array로 주어진 이미지
+            box_threshold (float): 예측된 box들을 걸러낼 mAP threshold. Defaults to 0.1.
+
+        Returns:
+            predict (list): detection 모델의 예측 결과 (bbox 좌표, confidence score)
+        """
+        inference = self.inference_detector(self.detector, img)
+        predict = []
+        for label, bboxes in enumerate(inference):
+            for bbox in bboxes:
+                if bbox[-1] > box_threshold:
+                    predict.append(list(bbox) + [label])
+        return predict
+
+    def overlap(self, bbox: list, patch: list) -> bool:
+        """사각형 겹침 여부 확인
+
+        Args:
+            bbox (list): x, y, w, h
+            patch (list): x, y, w, h
+
+        Returns:
+            overlap (bool): bbox와 patch가 겹치면 True
+        """
+        l1, t1, r1, b1 = bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]
+        l2, t2, r2, b2 = patch[0], patch[1], patch[0] + patch[2], patch[1] + patch[3]
+
+        overlap = not (r1 <= l2 or l1 >= r2 or b1 <= t2 or t1 >= b2)
+        return overlap
+
+    def resize_box(self, bbox: list, img_shape: list) -> list:
+        """변경된 이미지 사이즈에 맞춰서 annotation 좌표 변환
+
+        Args:
+            bbox (list): DB에서 불러온 annotation 좌표 (w: 2339, h: 3309 기준)
+            img_shape (list): 현재 예측을 수행하려 하는 이미지 크기 (height, width)
+
+        Returns:
+            bbox (list): 현재 이미지 크기에 맞춰 변환된 annotation 좌표
+        """
+        w_r = img_shape[1] / self.origin_img_shape[0]
+        h_r = img_shape[0] / self.origin_img_shape[1]
+
+        bbox = [
+            int(bbox[0] * w_r),
+            int(bbox[1] * h_r),
+            int(bbox[2] * w_r),
+            int(bbox[3] * h_r),
+        ]
+        return bbox
+
+    def save_predict(self, img: np.array, img_path: int, bbox: list):
+        """예측된 결과 로깅 (이미지에 파란색 bbox, 예측 클래스, confidence score 합성)
+
+        Args:
+            img (np.array): 예측 결과를 위한
+            img_path (str): page 수
+            bbox (list): 모델 예측 결과 (x, y, w, h, confidence score, class)
+        """
+        x, y, w, h = map(int, bbox[:4])
+        confidence = bbox[4]
+        pred = bbox[5]
+        cv2.putText(
+            img,
+            f"{pred}   {confidence:.4f}",
+            (x, y - 10),
+            cv2.FONT_HERSHEY_COMPLEX,
+            0.9,
+            (255, 0, 0),
+            3,
+        )
+        cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 3)
+        cv2.imwrite(
+            f"/opt/ml/input/code/fastapi/app/log/{self.time}/{img_path}_predict.jpg",
+            img,
+        )
+
+    def save_score_img(self, scoring_result: list) -> List[Image.Image]:
+        """채점된 이미지를 만드는 함수
+
+        Args:
+            self (_type_): _description_
+            scoring_result(dict): 채점 결과
+
+        Returns:
+            score_img(list(PIL.Image.Image)): 빨간색 o, x가 합성된 채점된 이미지
+        """
+        # 채점된 이미지를 만들기 위해 o, x 이미지를 불러오는 부분입니다.
+        o_image = Image.open("/opt/ml/input/code/fastapi/app/scoring_image/correct.png")
+        x_image = Image.open("/opt/ml/input/code/fastapi/app/scoring_image/wrong.png")
+        o_width, o_height = o_image.size
+        x_width, x_height = x_image.size
+
+        # 배경사진을 불러와 채점결과를 보고, O, X이미지를 붙여 채점 완료 이미지를 만드는 부분
+        score_img = []
+        for idx, img in enumerate(self.images):
+            background = Image.fromarray(img)
+            question = self.q_bbox[idx][0]
+            img_shape = img.shape
+            for q in question:
+                bbox = self.resize_box(question[q], img_shape)
+                if scoring_result[q] == "O":
+                    background.paste(
+                        o_image,
+                        (
+                            int(bbox[0] - o_width / 2),
+                            int(bbox[1] - o_height / 2) + 10,
+                        ),
+                        o_image,
+                    )
+                elif scoring_result[q] == "X":
+                    background.paste(
+                        x_image,
+                        (
+                            int(bbox[0] - x_width / 2),
+                            int(bbox[1] - x_height / 2) + 10,
+                        ),
+                        x_image,
+                    )
+            score_img.append(background)
+        return score_img
+
+    def is_in(self, box: list, x_min: float, y_min: float) -> bool:
+        """좌측하단점이 box 안에 포함되는지 여부 확인
+
+        Args:
+            box (list): 점과 비교할 box (x, y, w, h)
+            x_min (float): 좌측 하단점의 x 좌표
+            y_min (float): 좌측 하단점의 y 좌표
+
+        Returns:
+            bool: 좌측하단 점이 box 안에 포함되면 True
+        """
+        return box[0] < x_min < box[0] + box[2] and box[1] < y_min < box[1] + box[3]
+
+    def main(self):
+        """주어진 이미지에 대한 모델 예측, 채점 결과(이미지)를 만드는 함수
+
+        Returns:
+            scoring_img list(Image), log_pred(list): 채점이 완료된 이미지, DB에 로깅하기 위한 예측 결과(좌표, score, 예측결과)
+        """
+        images = deepcopy(self.images)
+        result = dict()
+        log_pred = []
+        for idx, img in enumerate(images):
+            # 모델 예측
+            predict = self.get_predict(img)
+            # 좌표 변환: ltrb -> xywh (좌상단)
+            for i in range(len(predict)):
+                predict[i] = self.ltrb2xywh(predict[i][:4]) + predict[i][4:]
+            question = self.q_bbox[idx][0]
+            # input이미지 크기에 맞게 문제 annotation resize
+            resize_question = {}
+            for q, v in question.items():
+                resize_q = self.resize_box(question[q], img.shape)
+                resize_question[q] = resize_q
+                tmp = []
+                # 모델 예측(정답) 결과가 annotation(문제)과 겹치며, confidence score가 가장 높으면 예측 결과 사용
+                for p in predict:
+                    if self.overlap(resize_q, p[:4]):
+                        p.append(q)
+                        tmp.append(p)
+                if tmp:
+                    tmp = sorted(tmp, key=lambda x: x[4])
+                    pred = tmp[-1]
+                    result[q] = pred[-2]
+                    log_pred.append(pred)
+                    self.save_predict(img, idx, pred)
+                else:
+                    result[q] = -1
+
+            # 시험지의 좌측, 우측을 분리
+            h, w, c = img.shape
+            middle_line = w / 2
+            left_questions = []
+            right_questions = []
+            for q in resize_question:
+                if resize_question[q][0] < middle_line:  # top-left의 x좌표가 중앙선보다 작으면 왼쪽에
+                    left_questions.append(resize_question[q])
+                else:
+                    right_questions.append(resize_question[q])
+            # y좌표 기준으로 정렬
+            left_questions.sort(key=lambda x: x[1])
+            right_questions.sort(key=lambda x: x[2])
+
+            areas = []  # 문제 구역 나눔 (문제와 문제 사이의 영역)
+            for i, box in enumerate(left_questions):
+                if i == (len(left_questions) - 1):
+                    areas.append(
+                        [0, box[1] + box[3], middle_line, h - (box[1] + box[3])]
+                    )
+                else:
+                    areas.append(
+                        [
+                            0,
+                            box[1] + box[3],
+                            middle_line,
+                            left_questions[i + 1][1] - (box[1] + box[3]),
+                        ]
+                    )
+            for i, box in enumerate(right_questions):
+                if i == (len(right_questions) - 1):
+                    areas.append(
+                        [
+                            middle_line,
+                            box[1] + box[3],
+                            middle_line,
+                            h - (box[1] + box[3]),
+                        ]
+                    )
+                else:
+                    areas.append(
+                        [
+                            middle_line,
+                            box[1] + box[3],
+                            middle_line,
+                            right_questions[i + 1][1] - (box[1] + box[3]),
+                        ]
+                    )
+            # 주관식 채점
+            for i, q in enumerate(resize_question):
+                # 주관식(6)이거나, 문제박스와 겹치지 않은 예측(-1)에 대해
+                if result[q] == 6 or result[q] == -1:
+                    # 문제와 문제 사이의 영역에 좌측 하단 좌표가 들어있는 예측값만 filtering
+                    candidates = [
+                        pred
+                        for pred in predict
+                        if self.is_in(areas[i], pred[0], pred[1] + pred[3])
+                    ]
+                    if len(candidates) > 1:
+                        candidates.sort(key=lambda x: x[4], reverse=True)
+                    if candidates:
+                        x, y, w, h = list(map(int, candidates[0]))[:4]
+                        # 박스가 살짝 보이도록 자른 이미지로 ocr 모델 예측 수행
+                        ocr_pred = text_recognition(
+                            model=self.ocr_model,
+                            img_array=img[
+                                y - 10 : (y + h) + 10, x - 10 : (x + w) + 10, :
+                            ],
+                            device="cuda:0",
+                        )
+                        try:
+                            result[q] = int(ocr_pred)
+                        except:
+                            pass
+                        # DB logging을 위해 예측 값 저장
+                        if len(candidates[0]) != 7:
+                            candidates[0].append(q)
+                            log_pred.append(candidates[0])
+                            log_pred.sort(key=lambda x: x[6])
+                        candidates[0][5] = result[q]
+                        pred = candidates[0] + [result[q]]
+                        self.save_predict(img, idx, pred)
+
+        # 채점되지 않은 경우 -1로 수정
+        tmp = [i for i in range(1, 31)]
+        for x in result:
+            if x in tmp:
+                tmp[x - 1] = 0
+        for x in tmp:
+            if x != 0:
+                result[x] = -1
+
+        # 채점 및 채점된 이미지 생성
+        _score = score(result, self.answer)
+        scoring_img = self.save_score_img(_score)
+        return scoring_img, log_pred

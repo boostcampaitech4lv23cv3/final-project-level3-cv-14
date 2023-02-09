@@ -1,0 +1,4 @@
+outs:
+- md5: acd95c967863a58f740f6e636dedc98c
+  size: 198716005
+  path: recog_model.pth

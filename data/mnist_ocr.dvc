@@ -1,0 +1,5 @@
+outs:
+- md5: 8fe6075e373009ea77435c1d12645683.dir
+  size: 7623440
+  nfiles: 10001
+  path: mnist_ocr

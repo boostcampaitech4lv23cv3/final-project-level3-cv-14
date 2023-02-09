@@ -122,7 +122,7 @@ def mix_check():
                     png_list = os.listdir(png_path)
                     png_im = Image.open(png_path + png_list[np.random.randint(0, len(png_list))])
                     
-                    coordinate = [coordinate[0] - png_im.size[0] // 2, coordinate[1] - png_im.size[1]]
+                    coordinate = [coordinate[0] - png_im.size[0] // 2 + np.random.randint(-10, 10), coordinate[1] - png_im.size[1] + np.random.randint(0, 24)]
 
                     img.paste(png_im, tuple(coordinate), png_im)
         

@@ -1,18 +1,16 @@
-/train_v1
-/test_v1
-/train_v1-1
-/train_v1-2
-/train_v1-3
-/train_v1-4
-/t_v1-4
-/v_v1-4
-/train_v2
-/t_v2
-/v_v2
-/train_v3
-/t_v3
-/v_v3
 /base
-/train_v4
 /t_v4
 /v_v4
+/train_v4-2
+/t_v4-2
+/v_v4-2
+/train
+/val
+/mnist_ocr
+<<<<<<< HEAD
+/config.py
+/test_v2
+=======
+/t_v5
+/v_v5
+>>>>>>> 1107c4b8c449cee3d25bda0fd9266563e231bd76
